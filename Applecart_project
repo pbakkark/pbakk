@@ -1,0 +1,224 @@
+/*Join voter table with relevant model probability variables*/
+/*Create category variables for income and age*/
+/*Merge supporter and opposition files to add binary variables for support*/
+/*Create categorical variable for model classification of local school support*/
+Create Table append_voter as
+Select v.age, v.avgincome, v.party, v.uid,
+       m.persuadability__score, m.job_performance__candidateB,
+       m.issueA__no_concerns, m.issueA__serious_concerns,
+       m.issueA__some_concerns, m.vote__candidateB,
+       m.vote__candidateA, m.vote__other,
+       m.local_schools__good, m.local_schools__fair,
+       m.local_schools__poor, m.ideology__conservative,
+       m.ideology__liberal, m.ideology__moderate,
+       m.ideology__progressive, s.supporter, o.opposer,
+       CASE WHEN s.supporter = 1 THEN 1 ELSE 0 END AS support,
+       CASE WHEN o.opposer = 1 THEN 1 ELSE 0 END AS opponent,
+       CASE WHEN (m.local_schools__poor > m.local_schools__good) AND (m.local_schools__poor > m.local_schools__fair) THEN 'Poor'
+            WHEN (m.local_schools__fair >= m.local_schools__good) AND (m.local_schools__fair >= m.local_schools__good) THEN 'Fair'
+            ELSE 'Good'
+       END AS model_local_cat,
+       CASE WHEN (m.ideology__conservative > m.ideology__liberal) AND (m.ideology__conservative > m.ideology__moderate) AND
+                 (m.ideology__conservative > m.ideology__progressive) THEN 'conservative'
+            WHEN (m.ideology__liberal > m.ideology__conservative) AND (m.ideology__liberal > m.ideology__moderate) AND
+                 (m.ideology__liberal > m.ideology__progressive) THEN 'liberal'
+            WHEN (m.ideology__progressive > m.ideology__conservative) AND (m.ideology__progressive > m.ideology__moderate) AND
+                 (m.ideology__progressive > m.ideology__liberal) THEN 'progressive'
+            WHEN (m.ideology__moderate > m.ideology__liberal) AND (m.ideology__moderate > m.ideology__conservative) AND
+                 (m.ideology__moderate > m.ideology__progressive) THEN 'moderate'
+            ELSE 'Unknown'
+       END AS model_ideology_cat,
+CASE
+  WHEN age BETWEEN 18 AND 29 THEN '18-29'
+  WHEN age BETWEEN 30 AND 44 THEN '30-44'
+  WHEN age BETWEEN 45 AND 64 THEN '45-64'
+  WHEN age >= 65 THEN '65+'
+  ELSE 'Unknown'
+END AS age_cat,
+CASE
+  WHEN avgincome BETWEEN 1 AND 25000 THEN '25k or less'
+  WHEN avgincome BETWEEN 25001 AND 50000 THEN '25k-50k'
+  WHEN avgincome BETWEEN 50001 AND 75000 THEN '50k-75k'
+  WHEN avgincome BETWEEN 75001 AND 100000 THEN '75k-100k'
+  WHEN avgincome > 100000 THEN '100k+'
+  ELSE 'Unknown'
+END AS income_cat
+From voter_file_csv as v
+INNER JOIN model_probabilities_csv as m
+ON v.uid = m.uid
+LEFT JOIN (Select *, 1 as supporter From supporters_updated_csv) as s
+ON v.uid = s.uid
+LEFT JOIN (Select *, 1 as opposer From opponents_updated_csv) as o
+ON v.uid = o.uid;
+
+/*Remove supporters who appeared in both support and opposition datasets*/
+/*Keep those that are in both support and opposition datasets in opposition as a precaution*/
+/*Create variable for model support and support dataset overlap*/
+Create table master_voter as
+Select *, CASE WHEN support = 1 AND opponent = 0 THEN 'Supports'
+               WHEN opponent = 1 THEN 'Opposes'
+               ELSE 'Unknown'
+          END AS charter_cat,
+          CASE WHEN (local_schools__poor > local_schools__good) AND
+                     (support = 1 AND opponent = 0) THEN 1 ELSE 0 END AS charter_support_overlap
+From append_voter;
+
+/*Sanity checks*/
+/*How many overlaps are there between supporter and opposition files?*/
+/*Are all voters on voter file also on the model probabilities file?*/
+Select count(*)
+From master_voter
+WHERE (support = 1 AND opponent = 1);
+
+Select count(*)
+From master_voter;
+
+Select count(*)
+From voter_file_csv;
+
+/*Other sanity can be made on each breakdown to see if numbers total to total observations - 434624*/
+/*Get Age breakdown*/
+Select age_cat, count(age_cat) as count, (count(age_cat) / (Select Count(*) From master_voter)) as percent
+From master_voter
+Group by age_cat
+Order by age_cat;
+
+/*Get income breakdown*/
+Select income_cat, count(income_cat) as count, (count(income_cat) / (Select Count(*) From master_voter)) as percent
+From master_voter
+Group by income_cat
+Order by income_cat;
+
+/*Get party breakdown*/
+Select party, count(party) as count, (count(party) / (Select Count(*) From master_voter)) as percent
+From master_voter
+Group by party
+Order by party;
+
+/*Get local school support breakdown*/
+Select model_local_cat, count(model_local_cat) as count, (count(model_local_cat) / (Select Count(*) From master_voter)) as percent
+From master_voter
+Group by model_local_cat;
+
+/*Get ideology breakdown*/
+Select model_ideology_cat, count(model_ideology_cat) as count, (count(model_ideology_cat) / (Select Count(*) From master_voter)) as percent
+From master_voter
+Group by model_ideology_cat
+Order by model_ideology_cat;
+
+/*Get known supporters  vs opponent breakdown*/
+Select charter_cat, count(charter_cat) as count, (count(charter_cat) / (Select Count(*) From master_voter)) as percent
+From master_voter
+Group by charter_cat;
+
+/*Get breakdown of how many supporters the model 'generally' predicted*/
+Select charter_support_overlap, count(charter_support_overlap) as count, (count(charter_support_overlap) / (Select Count(*) From master_voter)) as percent
+From master_voter
+Group by charter_support_overlap;
+
+Create table no_contact_list as
+Select v.uid, v.age_cat, v.income_cat,
+       v.party, v.model_ideology_cat,
+       v.charter_cat, u.household_key
+From master_voter as v
+LEFT JOIN uid_to_household_key_csv as u
+ON v.uid = u.uid
+Where v.charter_cat = 'Opposes' OR v.model_local_cat = 'Good';
+
+/*Sanity checks*/
+/*Are all opposing voters in household key dataset?*/
+Select count(*)
+From no_contact_list;
+
+Select count(*)
+From master_voter
+Where charter_cat = 'Opposes' OR model_local_cat = 'Good';
+
+/*Get no-contact households*/
+Create table no_contact_households as
+Select DISTINCT household_key
+From no_contact_list;
+
+/*Sanity Check to check amount of households looks reasonable*/
+Select count(*)
+From no_contact_households;
+
+/*Compare household to overall household ratio*/
+Create table household_check as
+Select Distinct household_key
+From uid_to_household_key_csv as u
+RIGHT JOIN voter_file_csv as v
+ON v.uid = u.uid;
+
+Select count(*)
+From household_check;
+
+/*voters to house ratio is about .62, makes sense that as we get smaller voter pool the ratio increases*/
+/*Get no-contact Age breakdown*/
+Select age_cat, count(age_cat) as count, (count(age_cat) / (Select Count(*) From no_contact_list)) as percent
+From no_contact_list
+Group by age_cat
+Order by age_cat;
+
+/*Get no-contact income breakdown*/
+Select income_cat, count(income_cat) as count, (count(income_cat) / (Select Count(*) From no_contact_list)) as percent
+From no_contact_list
+Group by income_cat
+Order by income_cat;
+
+/*Get no-contact party breakdown*/
+Select party, count(party) as count, (count(party) / (Select Count(*) From no_contact_list)) as percent
+From no_contact_list
+Group by party
+Order by party;
+
+/*Get ideology breakdown*/
+Select model_ideology_cat, count(model_ideology_cat) as count, (count(model_ideology_cat) / (Select Count(*) From no_contact_list)) as percent
+From no_contact_list
+Group by model_ideology_cat
+Order by model_ideology_cat;
+
+/*Get separate target populations*/
+/*First target population is for those who dislike Cand Bs job performace but are likely to vote for them*/
+/*Exclude those who we know support or oppose charters and are in no-contact list*/
+Select count(*)
+From master_voter
+Where charter_cat = 'Unknown' AND model_local_cat != 'Good' AND job_performance__candidateB < 0.5
+      AND vote__candidateB > vote__other AND vote__candidateB > vote__candidateA;
+
+/*Get distinct households for target population 1*/
+Create table household_target_list1 as
+Select DISTINCT u.household_key
+From master_voter as v
+LEFT JOIN uid_to_household_key_csv as u
+ON v.uid = u.uid
+Where v.charter_cat = 'Unknown' AND v.model_local_cat != 'Good' AND v.job_performance__candidateB < 0.5
+      AND v.vote__candidateB > v.vote__other AND v.vote__candidateB > v.vote__candidateA;
+
+/*Get household count*/
+select count(*)
+FROM household_target_list1;
+
+/*Second target list also includes those with serious concerns about issueA*/
+/*Also only include people who are likely to be persuadable*/
+Select count(*)
+From master_voter
+Where charter_cat = 'Unknown' AND model_local_cat != 'Good' AND job_performance__candidateB < 0.5
+      AND (vote__candidateB > vote__other AND vote__candidateB > vote__candidateA)
+      AND (issueA__serious_concerns > issueA__no_concerns AND issueA__serious_concerns > issueA__some_concerns)
+      AND persuadability__score > 0.5;
+
+/*Get distinct households for target population 2*/
+Create table household_target_list2 as
+Select DISTINCT u.household_key
+From master_voter as v
+LEFT JOIN uid_to_household_key_csv as u
+ON v.uid = u.uid
+Where charter_cat = 'Unknown' AND model_local_cat != 'Good' AND job_performance__candidateB < 0.5
+      AND (vote__candidateB > vote__other AND vote__candidateB > vote__candidateA)
+      AND (issueA__serious_concerns > issueA__no_concerns AND issueA__serious_concerns > issueA__some_concerns)
+      AND persuadability__score > 0.5;
+
+/*Get household counts*/
+Select count(*)
+From household_target_list2;
